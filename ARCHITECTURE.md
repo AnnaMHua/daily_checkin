@@ -6,14 +6,14 @@
 
 ```text
 macOS LaunchAgent
-  -> ~/Library/Application Support/1point3acres-checkin/run_daily_launchagent.sh
-    -> ~/Library/Application Support/1point3acres-checkin/app/scripts/chrome_daily.py
+  -> ~/Library/Application Support/daily_checkin/run_daily_launchagent.sh
+    -> ~/Library/Application Support/daily_checkin/app/scripts/chrome_daily.py
       -> AppleScript / osascript
         -> Google Chrome window 1
           -> daily-question / daily-checkin 页面
 ```
 
-定时任务由 LaunchAgent 负责触发。安装脚本会把运行所需的 Python 脚本、公开题库和可选配置复制到 `~/Library/Application Support/1point3acres-checkin/app`，然后让 LaunchAgent 从这个英文路径下启动 wrapper。这样做是为了避开 macOS 后台任务读取 `Documents` 目录时可能遇到的 TCC 权限限制。
+定时任务由 LaunchAgent 负责触发。安装脚本会把运行所需的 Python 脚本、公开题库和可选配置复制到 `~/Library/Application Support/daily_checkin/app`，然后让 LaunchAgent 从这个英文路径下启动 wrapper。这样做是为了避开 macOS 后台任务读取 `Documents` 目录时可能遇到的 TCC 权限限制。
 
 每次运行 `scripts/install_launchagent.sh` 都会重新部署运行副本，所以修改 `scripts/chrome_daily.py`、`data/question_bank.json` 或 `.env` 后，需要重新安装一次 LaunchAgent 才会影响后台定时任务。
 
@@ -25,11 +25,11 @@ macOS LaunchAgent
 
 - 默认每天 `00:05` 运行。
 - 支持传入小时和分钟，例如 `./scripts/install_launchagent.sh 20 30`。
-- 自动卸载旧 cron 任务，避免 cron 和 LaunchAgent 重复执行。
-- 生成 `~/Library/LaunchAgents/com.annahua.1point3acres.checkin.plist`。
-- 生成 `~/Library/Application Support/1point3acres-checkin/run_daily_launchagent.sh`。
-- 部署运行副本到 `~/Library/Application Support/1point3acres-checkin/app`。
+- 生成 `~/Library/LaunchAgents/com.annahua.daily-checkin.plist`。
+- 生成 `~/Library/Application Support/daily_checkin/run_daily_launchagent.sh`。
+- 部署运行副本到 `~/Library/Application Support/daily_checkin/app`。
 - 载入 LaunchAgent，让 macOS 按 `StartCalendarInterval` 触发。
+- 安装时会卸载并删除 rename 前的旧 plist `com.annahua.1point3acres.checkin.plist`，避免新旧任务重复运行。
 
 ### `scripts/uninstall_launchagent.sh`
 
@@ -49,10 +49,6 @@ macOS LaunchAgent
 - `sync-bank`：同步公开题库。
 
 LaunchAgent 当前不直接调用这个脚本，而是调用部署到 `Application Support` 的 `chrome_daily.py` 副本。这是为了降低后台权限问题。
-
-### `scripts/install_cron.sh` / `scripts/uninstall_cron.sh`
-
-旧 cron 方案保留在仓库里，仅用于历史兼容。当前推荐路径是 LaunchAgent；安装 LaunchAgent 时会主动清理旧 cron 任务，避免重复运行。
 
 ### `scripts/chrome_daily.py`
 
@@ -91,13 +87,13 @@ LaunchAgent 当前不直接调用这个脚本，而是调用部署到 `Applicati
 
 ## 日志
 
-手动运行时日志写到项目的 `logs/cron.log`。
+手动运行时日志直接输出到当前终端。
 
 LaunchAgent 运行时日志写到：
 
 ```text
-~/Library/Application Support/1point3acres-checkin/launchagent.out.log
-~/Library/Application Support/1point3acres-checkin/launchagent.err.log
+~/Library/Application Support/daily_checkin/launchagent.out.log
+~/Library/Application Support/daily_checkin/launchagent.err.log
 ```
 
 `launchagent.out.log` 记录正常运行结果，例如已答题、已签到、成功完成。`launchagent.err.log` 记录 shell 或系统层错误。
@@ -131,7 +127,7 @@ LaunchAgent 运行时日志写到：
 
 ## 为什么使用 LaunchAgent
 
-相较于 cron，LaunchAgent 更适合 macOS 桌面自动化：
+LaunchAgent 适合 macOS 桌面自动化：
 
 - 电脑休眠错过时间后，唤醒时可以补跑。
 - 运行在用户图形会话中，可以操作用户的 Chrome。
@@ -175,14 +171,14 @@ Success: All daily tasks (Question and Check-in) are completed!
 查看 LaunchAgent 状态：
 
 ```bash
-launchctl print gui/$(id -u)/com.annahua.1point3acres.checkin
+launchctl print gui/$(id -u)/com.annahua.daily-checkin
 ```
 
 查看运行日志：
 
 ```bash
-tail -n 80 "$HOME/Library/Application Support/1point3acres-checkin/launchagent.out.log"
-tail -n 80 "$HOME/Library/Application Support/1point3acres-checkin/launchagent.err.log"
+tail -n 80 "$HOME/Library/Application Support/daily_checkin/launchagent.out.log"
+tail -n 80 "$HOME/Library/Application Support/daily_checkin/launchagent.err.log"
 ```
 
 卸载：

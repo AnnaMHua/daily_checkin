@@ -681,7 +681,14 @@ def wait_for_checkin_submit_status(timeout: int = 8) -> str:
     return "submitted"
 
 
-def remember_answer(question: str, options: List[str], answer: str, source: str, status: str) -> None:
+def remember_answer(
+    question: str,
+    options: List[str],
+    answer: str,
+    source: str,
+    status: str,
+    confirm_answer: bool = False,
+) -> None:
     records = bank_records(LOCAL_BANK_FILE)
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     question_norm = normalize(question)
@@ -694,7 +701,7 @@ def remember_answer(question: str, options: List[str], answer: str, source: str,
         existing = {"question": question, "answers": [], "options_seen": []}
         records.append(existing)
     answers = answer_values(existing)
-    if normalize(answer) not in {normalize(item) for item in answers}:
+    if confirm_answer and answer.strip() and normalize(answer) not in {normalize(item) for item in answers}:
         answers.append(answer)
     existing["answers"] = answers
     existing["options_seen"] = options
@@ -763,7 +770,14 @@ def run_question(submit: bool, extension_timeout: int) -> str:
     if submit:
         click_question_answer(answer["index"], submit=True)
         status = wait_for_question_submit_status()
-        remember_answer(question, options, answer["answer"], answer["source"], status)
+        remember_answer(
+            question,
+            options,
+            answer["answer"],
+            answer["source"],
+            status,
+            confirm_answer=(status == "success"),
+        )
         log(f"Question submit status: {status}")
         return status
     click_question_answer(answer["index"], submit=False)

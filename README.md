@@ -9,7 +9,7 @@
 
 ## 当前方案
 
-定时任务使用 macOS LaunchAgent，而不是 cron。
+定时任务使用 macOS LaunchAgent。
 
 LaunchAgent 的优势：
 
@@ -62,10 +62,9 @@ LaunchAgent 的优势：
 
 安装脚本会：
 
-- 清理旧的 cron 任务。
-- 生成 `~/Library/LaunchAgents/com.annahua.1point3acres.checkin.plist`。
-- 把运行副本部署到 `~/Library/Application Support/1point3acres-checkin/app`。
-- 生成后台入口 `~/Library/Application Support/1point3acres-checkin/run_daily_launchagent.sh`。
+- 生成 `~/Library/LaunchAgents/com.annahua.daily-checkin.plist`。
+- 把运行副本部署到 `~/Library/Application Support/daily_checkin/app`。
+- 生成后台入口 `~/Library/Application Support/daily_checkin/run_daily_launchagent.sh`。
 - 载入 LaunchAgent。
 
 卸载：
@@ -91,7 +90,7 @@ date '+%H %M %Y-%m-%d %H:%M:%S %Z'
 等待到点后查看状态：
 
 ```bash
-launchctl print gui/$(id -u)/com.annahua.1point3acres.checkin
+launchctl print gui/$(id -u)/com.annahua.daily-checkin
 ```
 
 成功时会看到 `runs = 1` 和 `last exit code = 0`。
@@ -124,17 +123,13 @@ cp .env.example .env
 
 ## 日志
 
-手动运行日志：
-
-```text
-logs/cron.log
-```
+手动运行时，日志会直接输出到当前终端。
 
 LaunchAgent 运行日志：
 
 ```text
-~/Library/Application Support/1point3acres-checkin/launchagent.out.log
-~/Library/Application Support/1point3acres-checkin/launchagent.err.log
+~/Library/Application Support/daily_checkin/launchagent.out.log
+~/Library/Application Support/daily_checkin/launchagent.err.log
 ```
 
 成功日志通常类似：
@@ -154,7 +149,7 @@ Success: All daily tasks (Question and Check-in) are completed!
 
 ### Operation not permitted
 
-如果后台任务直接读取 `Documents` 目录里的脚本，macOS 可能因为 TCC 权限拦截。当前 LaunchAgent 安装脚本已经改为从 `~/Library/Application Support/1point3acres-checkin` 下的运行副本启动，用来规避这个问题。
+如果后台任务直接读取 `Documents` 目录里的脚本，macOS 可能因为 TCC 权限拦截。当前 LaunchAgent 安装脚本已经改为从 `~/Library/Application Support/daily_checkin` 下的运行副本启动，用来规避这个问题。
 
 ### 真人验证或验证码
 
@@ -167,7 +162,3 @@ Success: All daily tasks (Question and Check-in) are completed!
 ## 更多文档
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)：项目架构、组件职责、数据流、权限模型和错误处理。
-
-## 旧 cron 脚本
-
-仓库里仍保留 `scripts/install_cron.sh` 和 `scripts/uninstall_cron.sh`，只用于历史兼容。当前推荐使用 LaunchAgent。

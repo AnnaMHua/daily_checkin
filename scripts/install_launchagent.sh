@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLIST_NAME="com.annahua.1point3acres.checkin.plist"
+LAUNCHAGENT_LABEL="com.annahua.daily-checkin"
+PLIST_NAME="$LAUNCHAGENT_LABEL.plist"
+LEGACY_PLIST_NAME="com.annahua.1point3acres.checkin.plist"
 TARGET_DIR="$HOME/Library/LaunchAgents"
 TARGET_FILE="$TARGET_DIR/$PLIST_NAME"
-SUPPORT_DIR="$HOME/Library/Application Support/1point3acres-checkin"
+LEGACY_TARGET_FILE="$TARGET_DIR/$LEGACY_PLIST_NAME"
+SUPPORT_DIR="$HOME/Library/Application Support/daily_checkin"
 APP_DIR="$SUPPORT_DIR/app"
 WRAPPER="$SUPPORT_DIR/run_daily_launchagent.sh"
 STDOUT_LOG="$SUPPORT_DIR/launchagent.out.log"
@@ -15,11 +18,12 @@ STDERR_LOG="$SUPPORT_DIR/launchagent.err.log"
 HOUR="${1:-0}"
 MINUTE="${2:-5}"
 
-# Remove existing cron job first to clean up
-"$ROOT/scripts/uninstall_cron.sh" >/dev/null 2>&1 || true
-
-# Unload existing launchagent if any
+# Unload existing LaunchAgents if any, including the pre-rename label.
 launchctl unload "$TARGET_FILE" >/dev/null 2>&1 || true
+launchctl unload "$LEGACY_TARGET_FILE" >/dev/null 2>&1 || true
+if [ -f "$LEGACY_TARGET_FILE" ]; then
+    rm -f "$LEGACY_TARGET_FILE"
+fi
 mkdir -p "$TARGET_DIR"
 mkdir -p "$SUPPORT_DIR"
 mkdir -p "$APP_DIR/scripts" "$APP_DIR/data" "$APP_DIR/logs"
@@ -55,7 +59,7 @@ cat <<EOF > "$TARGET_FILE"
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.annahua.1point3acres.checkin</string>
+    <string>$LAUNCHAGENT_LABEL</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
