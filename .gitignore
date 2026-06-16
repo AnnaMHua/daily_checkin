@@ -1,0 +1,11 @@
+.auth/
+.env
+.playwright-browsers/
+.venv/
+logs/
+screenshots/
+__pycache__/
+.pycache/
+*.pyc
+
+data/local_question_bank.json
