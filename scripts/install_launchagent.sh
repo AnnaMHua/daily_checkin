@@ -10,6 +10,8 @@ TARGET_FILE="$TARGET_DIR/$PLIST_NAME"
 LEGACY_TARGET_FILE="$TARGET_DIR/$LEGACY_PLIST_NAME"
 SUPPORT_DIR="$HOME/Library/Application Support/daily_checkin"
 APP_DIR="$SUPPORT_DIR/app"
+LEGACY_SUPPORT_DIR="$HOME/Library/Application Support/1point3acres-checkin"
+LEGACY_APP_DIR="$LEGACY_SUPPORT_DIR/app"
 WRAPPER="$SUPPORT_DIR/run_daily_launchagent.sh"
 STDOUT_LOG="$SUPPORT_DIR/launchagent.out.log"
 STDERR_LOG="$SUPPORT_DIR/launchagent.err.log"
@@ -32,6 +34,8 @@ cp "$ROOT/scripts/chrome_daily.py" "$APP_DIR/scripts/chrome_daily.py"
 cp "$ROOT/data/question_bank.json" "$APP_DIR/data/question_bank.json"
 if [ -f "$ROOT/data/local_question_bank.json" ] && [ ! -f "$APP_DIR/data/local_question_bank.json" ]; then
     cp "$ROOT/data/local_question_bank.json" "$APP_DIR/data/local_question_bank.json"
+elif [ -f "$LEGACY_APP_DIR/data/local_question_bank.json" ] && [ ! -f "$APP_DIR/data/local_question_bank.json" ]; then
+    cp "$LEGACY_APP_DIR/data/local_question_bank.json" "$APP_DIR/data/local_question_bank.json"
 fi
 if [ -f "$ROOT/.env" ]; then
     cp "$ROOT/.env" "$APP_DIR/.env"

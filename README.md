@@ -24,6 +24,7 @@ LaunchAgent 的优势：
 请先确认：
 
 - 你平时使用的 Google Chrome 已登录一亩三分地。
+- `.env` 里的 `CHROME_PROFILE_DIRECTORY` 指向这个已登录的 Chrome profile。通常是 `Default`。
 - Chrome 已启用 `View -> Developer -> Allow JavaScript from Apple Events`。
 - macOS 已允许 `bash` / `osascript` 控制 Google Chrome。
 - 可选：已安装 Chrome 扩展“一亩三分地每日答题助手”。
@@ -101,15 +102,23 @@ launchctl print gui/$(id -u)/com.annahua.daily-checkin
 ./scripts/install_launchagent.sh
 ```
 
-## 配置签到文本
+## 配置 Chrome profile 和签到文本
 
-可选：复制 `.env.example` 为 `.env`，修改 `DAILY_CHECKIN_MESSAGES`。
+可选：复制 `.env.example` 为 `.env`，修改 `CHROME_PROFILE_DIRECTORY` 或 `DAILY_CHECKIN_MESSAGES`。
 
 ```bash
 cp .env.example .env
 ```
 
 多个签到文本用 `|` 分隔，脚本每天随机选一句。
+
+查看本机 Chrome profile：
+
+```bash
+jq '.profile.info_cache | to_entries[] | {dir: .key, name: .value.name, user_name: .value.user_name}' "$HOME/Library/Application Support/Google/Chrome/Local State"
+```
+
+修改 `.env` 后，需要重新运行 `./scripts/install_launchagent.sh`，后台定时任务才会拿到新配置。
 
 ## 答题来源
 
@@ -157,7 +166,7 @@ Success: All daily tasks (Question and Check-in) are completed!
 
 ### Chrome 没有登录
 
-脚本依赖普通 Chrome 的已登录状态。请先在 Chrome 里打开一亩三分地并确认登录有效。
+脚本依赖指定 Chrome profile 的已登录状态。请先在 Chrome 里打开一亩三分地并确认登录有效；如果弹出的不是平常的 profile，把 `.env` 里的 `CHROME_PROFILE_DIRECTORY` 改成已登录 profile 的目录名，然后重新安装 LaunchAgent。
 
 ## 更多文档
 

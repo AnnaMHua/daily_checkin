@@ -8,8 +8,9 @@
 macOS LaunchAgent
   -> ~/Library/Application Support/daily_checkin/run_daily_launchagent.sh
     -> ~/Library/Application Support/daily_checkin/app/scripts/chrome_daily.py
+      -> Chrome executable with --profile-directory
       -> AppleScript / osascript
-        -> Google Chrome window 1
+        -> matching Google Chrome tab
           -> daily-question / daily-checkin 页面
 ```
 
@@ -54,7 +55,7 @@ LaunchAgent 当前不直接调用这个脚本，而是调用部署到 `Applicati
 
 核心自动化逻辑。
 
-- 通过 AppleScript 控制普通 Google Chrome 的 `window 1`。
+- 通过 `--profile-directory` 打开指定 Chrome profile，再用 AppleScript 控制匹配的一亩三分地标签页。
 - 打开每日答题页并解析题目和选项。
 - 优先等待 Chrome 答题助手扩展给出的页面标记。
 - 再查本地题库和公开题库。
@@ -83,7 +84,11 @@ LaunchAgent 当前不直接调用这个脚本，而是调用部署到 `Applicati
 
 ### `.env`
 
-可选配置文件，已在 `.gitignore` 中忽略。当前主要用于 `DAILY_CHECKIN_MESSAGES`，多个签到文本用 `|` 分隔。
+可选配置文件，已在 `.gitignore` 中忽略。当前支持：
+
+- `CHROME_PROFILE_DIRECTORY`：要使用的 Chrome profile 目录名，例如 `Default`。
+- `CHROME_EXECUTABLE`：可选，Chrome 可执行文件路径。
+- `DAILY_CHECKIN_MESSAGES`：多个签到文本用 `|` 分隔。
 
 ## 日志
 
@@ -108,6 +113,7 @@ LaunchAgent 运行时日志写到：
 
 - Chrome 启用 `Allow JavaScript from Apple Events`。
 - macOS 允许 `bash` / `osascript` 控制 Google Chrome。
+- `.env` 中的 `CHROME_PROFILE_DIRECTORY` 指向已经登录一亩三分地的 Chrome profile。
 
 这个授权通常只需要确认一次。之后 LaunchAgent 到点运行时不应该反复弹窗。
 
@@ -132,6 +138,8 @@ LaunchAgent 适合 macOS 桌面自动化：
 - 电脑休眠错过时间后，唤醒时可以补跑。
 - 运行在用户图形会话中，可以操作用户的 Chrome。
 - 不需要前台激活 Chrome，避免打断当前操作。
+
+脚本会先通过 Chrome 可执行文件和 `--profile-directory` 打开目标页面，再用 AppleScript 查找匹配的一亩三分地标签页执行 JavaScript，避免误操作最前面的非登录 profile 窗口。
 
 ## 已验证链路
 

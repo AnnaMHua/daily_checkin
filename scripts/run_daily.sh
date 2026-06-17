@@ -8,13 +8,6 @@ export TZ="${TZ:-America/Los_Angeles}"
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-if [[ -f "$ROOT/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$ROOT/.env"
-  set +a
-fi
-
 mkdir -p "$ROOT/logs"
 
 if [[ $# -eq 0 ]]; then

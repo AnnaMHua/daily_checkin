@@ -26,6 +26,40 @@ LOG_DIR = ROOT / "logs"
 PUBLIC_BANK_FILE = DATA_DIR / "question_bank.json"
 LOCAL_BANK_FILE = DATA_DIR / "local_question_bank.json"
 
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+load_env_file(ROOT / ".env")
+
+CHROME_APP_NAME = os.environ.get("CHROME_APP_NAME", "Google Chrome").strip() or "Google Chrome"
+CHROME_EXECUTABLE = Path(
+    os.environ.get(
+        "CHROME_EXECUTABLE",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    )
+)
+CHROME_PROFILE_DIRECTORY = os.environ.get("CHROME_PROFILE_DIRECTORY", "Default").strip()
+ACTIVE_URL_PREFIX = ""
+
 QUESTION_URL = "https://www.1point3acres.com/next/daily-question"
 CHECKIN_URL = "https://www.1point3acres.com/next/daily-checkin"
 QUESTION_SUBMIT_SPAN_SELECTOR = (
@@ -105,18 +139,77 @@ def run_osascript(script: str) -> str:
     return result.stdout.strip()
 
 
+def applescript_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def chrome_target_script(js_path: str) -> str:
+    return (
+        f"set jsCode to read POSIX file {applescript_string(js_path)}\n"
+        f"set urlPrefix to {applescript_string(ACTIVE_URL_PREFIX)}\n"
+        f"tell application {applescript_string(CHROME_APP_NAME)}\n"
+        "  if not (exists window 1) then\n"
+        "    if urlPrefix is \"\" then\n"
+        "      make new window\n"
+        "    else\n"
+        "      error \"Chrome target tab is not available yet\"\n"
+        "    end if\n"
+        "  end if\n"
+        "  set targetWindow to missing value\n"
+        "  set targetTabIndex to missing value\n"
+        "  if urlPrefix is not \"\" then\n"
+        "    repeat with w in windows\n"
+        "      repeat with tabNumber from 1 to count tabs of w\n"
+        "        set t to tab tabNumber of w\n"
+        "        try\n"
+        "          if (URL of t starts with urlPrefix) then\n"
+        "            set targetWindow to w\n"
+        "            set targetTabIndex to tabNumber\n"
+        "            exit repeat\n"
+        "          end if\n"
+        "        end try\n"
+        "      end repeat\n"
+        "      if targetWindow is not missing value then exit repeat\n"
+        "    end repeat\n"
+        "  end if\n"
+        "  if targetWindow is missing value then\n"
+        "    if urlPrefix is not \"\" then\n"
+        "      error \"Chrome target tab is not available yet\"\n"
+        "    else\n"
+        "      set targetWindow to window 1\n"
+        "      set targetTabIndex to active tab index of window 1\n"
+        "    end if\n"
+        "  else\n"
+        "    set active tab index of targetWindow to targetTabIndex\n"
+        "  end if\n"
+        "  execute active tab of targetWindow javascript jsCode\n"
+        "end tell"
+    )
+
+
+def chrome_launch(url: str) -> None:
+    if not CHROME_EXECUTABLE.exists():
+        raise DailyError(f"Chrome executable not found: {CHROME_EXECUTABLE}")
+
+    args = [str(CHROME_EXECUTABLE)]
+    if CHROME_PROFILE_DIRECTORY:
+        args.append(f"--profile-directory={CHROME_PROFILE_DIRECTORY}")
+    args.append(url)
+    subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(1)
+
+
 def chrome_eval(js: str) -> str:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as temp:
         temp.write(js)
         temp_path = temp.name
     try:
-        script = (
-            f'set jsCode to read POSIX file "{temp_path}"\n'
-            'tell application "Google Chrome"\n'
-            '  if not (exists window 1) then make new window\n'
-            "  execute active tab of window 1 javascript jsCode\n"
-            "end tell"
-        )
+        script = chrome_target_script(temp_path)
         for attempt in range(3):
             try:
                 return run_osascript(script)
@@ -135,22 +228,28 @@ def chrome_eval(js: str) -> str:
 
 
 def chrome_open(url: str) -> None:
-    script = (
-        'tell application "Google Chrome"\n'
-        "  if not (exists window 1) then make new window\n"
-        f'  set URL of active tab of window 1 to "{url}"\n'
-        "end tell"
-    )
-    run_osascript(script)
+    global ACTIVE_URL_PREFIX
+    ACTIVE_URL_PREFIX = url
+    chrome_launch(url)
 
 
 def wait_for_url(url: str, timeout: int = 30) -> None:
     deadline = time.time() + timeout
+    last_error = ""
     while time.time() < deadline:
-        current = chrome_eval("location.href")
+        try:
+            current = chrome_eval("location.href")
+        except DailyError as exc:
+            last_error = str(exc)
+            if "Chrome target tab is not available yet" in last_error:
+                time.sleep(0.5)
+                continue
+            raise
         if current.startswith(url):
             return
         time.sleep(0.5)
+    if last_error:
+        raise DailyError(f"Chrome did not navigate to {url} ({last_error})")
     raise DailyError(f"Chrome did not navigate to {url}")
 
 
@@ -829,6 +928,8 @@ def run_checkin(submit: bool, message: Optional[str]) -> str:
 def run(args: argparse.Namespace) -> int:
     submit = args.submit
     failed = False
+    profile = CHROME_PROFILE_DIRECTORY or "Chrome default"
+    log(f"Using Chrome profile directory: {profile}")
 
     try:
         q_status = run_question(submit=submit, extension_timeout=args.extension_timeout)
