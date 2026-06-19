@@ -52,7 +52,7 @@ export LC_ALL="en_US.UTF-8"
 
 echo "[\$(/bin/date '+%Y-%m-%d %H:%M:%S %Z')] LaunchAgent starting"
 cd "$APP_DIR"
-exec /usr/bin/python3 "$APP_DIR/scripts/chrome_daily.py" run --submit
+exec /usr/bin/python3 "$APP_DIR/scripts/chrome_daily.py" run --control cdp --submit --random-start-delay
 EOF
 
 chmod 755 "$WRAPPER"

@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Daily 1Point3Acres automation through the user's logged-in Chrome.
+"""Daily 1Point3Acres automation through a dedicated logged-in Chrome profile.
 
 This runner does not solve or bypass human verification. It operates only on a
-normal, already logged-in Chrome page through AppleScript JavaScript execution.
+normal, already logged-in Chrome page through local browser automation.
 """
 
 import argparse
+import base64
 import datetime as dt
+import hashlib
+import http.client
 import json
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unicodedata
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -58,7 +63,26 @@ CHROME_EXECUTABLE = Path(
     )
 )
 CHROME_PROFILE_DIRECTORY = os.environ.get("CHROME_PROFILE_DIRECTORY", "Default").strip()
+CHROME_CONTROL_MODE = os.environ.get("CHROME_CONTROL_MODE", "cdp").strip() or "cdp"
+CHROME_CDP_ADDRESS = os.environ.get("CHROME_CDP_ADDRESS", "127.0.0.1").strip() or "127.0.0.1"
+CHROME_CDP_PORT = int(os.environ.get("CHROME_CDP_PORT", "9223"))
+CHROME_USER_DATA_DIR = Path(
+    os.path.expandvars(
+        os.path.expanduser(
+            os.environ.get(
+                "CHROME_USER_DATA_DIR",
+                "~/Library/Application Support/daily_checkin/chrome-profile",
+            )
+        )
+    )
+)
+CHROME_EXTENSION_TIMEOUT = int(os.environ.get("CHROME_EXTENSION_TIMEOUT", "0"))
+CLICK_WAIT_MIN_SECONDS = float(os.environ.get("CLICK_WAIT_MIN_SECONDS", "0.8"))
+CLICK_WAIT_MAX_SECONDS = float(os.environ.get("CLICK_WAIT_MAX_SECONDS", "2.4"))
+LAUNCH_RANDOM_DELAY_MIN_SECONDS = float(os.environ.get("LAUNCH_RANDOM_DELAY_MIN_SECONDS", "0"))
+LAUNCH_RANDOM_DELAY_MAX_SECONDS = float(os.environ.get("LAUNCH_RANDOM_DELAY_MAX_SECONDS", "600"))
 ACTIVE_URL_PREFIX = ""
+CDP_CONTROLLER = None
 
 QUESTION_URL = "https://www.1point3acres.com/next/daily-question"
 CHECKIN_URL = "https://www.1point3acres.com/next/daily-checkin"
@@ -121,10 +145,321 @@ class DailyError(RuntimeError):
     pass
 
 
+class ManualAttentionError(DailyError):
+    pass
+
+
 def log(message: str) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{stamp}] {message}", flush=True)
+
+
+def click_wait_range() -> Tuple[float, float]:
+    lower = max(0.0, CLICK_WAIT_MIN_SECONDS)
+    upper = max(0.0, CLICK_WAIT_MAX_SECONDS)
+    if upper < lower:
+        lower, upper = upper, lower
+    return lower, upper
+
+
+def wait_random_range(action: str, lower: float, upper: float) -> None:
+    lower = max(0.0, lower)
+    upper = max(0.0, upper)
+    if upper < lower:
+        lower, upper = upper, lower
+    if upper <= 0:
+        return
+    delay = random.uniform(lower, upper)
+    log(f"Waiting {delay:.2f}s before {action}.")
+    time.sleep(delay)
+
+
+def wait_before_click(action: str) -> None:
+    lower, upper = click_wait_range()
+    wait_random_range(action, lower, upper)
+
+
+def wait_before_launch_start() -> None:
+    wait_random_range(
+        "starting LaunchAgent daily run",
+        LAUNCH_RANDOM_DELAY_MIN_SECONDS,
+        LAUNCH_RANDOM_DELAY_MAX_SECONDS,
+    )
+
+
+def http_json(path: str, method: str = "GET", timeout: float = 2.0) -> Dict[str, Any]:
+    conn = http.client.HTTPConnection(CHROME_CDP_ADDRESS, CHROME_CDP_PORT, timeout=timeout)
+    try:
+        conn.request(method, path)
+        response = conn.getresponse()
+        body = response.read().decode("utf-8", errors="replace")
+        if response.status >= 400:
+            raise DailyError(f"CDP HTTP {method} {path} failed: {response.status} {body[:300]}")
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+class CdpWebSocket:
+    def __init__(self, url: str, timeout: float = 10.0):
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "ws":
+            raise DailyError(f"Unsupported CDP websocket URL: {url}")
+        self.host = parsed.hostname or CHROME_CDP_ADDRESS
+        self.port = parsed.port or 80
+        self.path = parsed.path or "/"
+        if parsed.query:
+            self.path += "?" + parsed.query
+        self.sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        self.next_id = 1
+        self._handshake()
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _handshake(self) -> None:
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {self.path} HTTP/1.1\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        self.sock.sendall(request.encode("ascii"))
+        response = self._recv_until(b"\r\n\r\n")
+        if b" 101 " not in response.split(b"\r\n", 1)[0]:
+            raise DailyError(f"CDP websocket handshake failed: {response[:300]!r}")
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        if accept.encode("ascii") not in response:
+            raise DailyError("CDP websocket handshake returned an invalid accept key")
+
+    def _recv_until(self, marker: bytes) -> bytes:
+        data = b""
+        while marker not in data:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        return data
+
+    def _recv_exact(self, size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining:
+            chunk = self.sock.recv(remaining)
+            if not chunk:
+                raise DailyError("CDP websocket closed unexpectedly")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        header = bytearray([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.extend([0x80 | 126, (length >> 8) & 0xFF, length & 0xFF])
+        else:
+            header.append(0x80 | 127)
+            header.extend(length.to_bytes(8, "big"))
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.sock.sendall(bytes(header) + mask + masked)
+
+    def _recv_message(self) -> Dict[str, Any]:
+        payload_parts = []
+        while True:
+            first, second = self._recv_exact(2)
+            fin = bool(first & 0x80)
+            opcode = first & 0x0F
+            masked = bool(second & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = int.from_bytes(self._recv_exact(2), "big")
+            elif length == 127:
+                length = int.from_bytes(self._recv_exact(8), "big")
+            mask = self._recv_exact(4) if masked else b""
+            payload = self._recv_exact(length) if length else b""
+            if masked:
+                payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+
+            if opcode == 8:
+                raise DailyError("CDP websocket closed")
+            if opcode == 9:
+                self._send_frame(10, payload)
+                continue
+            if opcode == 10:
+                continue
+            if opcode in {0, 1}:
+                payload_parts.append(payload)
+                if fin:
+                    return json.loads(b"".join(payload_parts).decode("utf-8"))
+
+    def request(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Dict[str, Any]:
+        request_id = self.next_id
+        self.next_id += 1
+        message = {"id": request_id, "method": method}
+        if params is not None:
+            message["params"] = params
+        previous_timeout = self.sock.gettimeout()
+        self.sock.settimeout(timeout)
+        try:
+            self._send_frame(1, json.dumps(message, separators=(",", ":")).encode("utf-8"))
+            while True:
+                response = self._recv_message()
+                if response.get("id") != request_id:
+                    continue
+                if "error" in response:
+                    raise DailyError(f"CDP {method} failed: {response['error']}")
+                return response.get("result", {})
+        finally:
+            self.sock.settimeout(previous_timeout)
+
+
+class CdpChromeController:
+    def __init__(self) -> None:
+        self.ws: Optional[CdpWebSocket] = None
+        self.target_id: Optional[str] = None
+
+    def _chrome_args(self, url: Optional[str] = None) -> List[str]:
+        args = [
+            str(CHROME_EXECUTABLE),
+            f"--user-data-dir={CHROME_USER_DATA_DIR}",
+            f"--profile-directory={CHROME_PROFILE_DIRECTORY or 'Default'}",
+            f"--remote-debugging-address={CHROME_CDP_ADDRESS}",
+            f"--remote-debugging-port={CHROME_CDP_PORT}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        if url:
+            args.append(url)
+        return args
+
+    def _launch_chrome(self, url: Optional[str] = None) -> None:
+        if not CHROME_EXECUTABLE.exists():
+            raise DailyError(f"Chrome executable not found: {CHROME_EXECUTABLE}")
+        CHROME_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            self._chrome_args(url),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    def ensure_running(self, start_url: Optional[str] = None) -> Dict[str, Any]:
+        try:
+            return http_json("/json/version", timeout=1.0)
+        except Exception:
+            pass
+
+        self._launch_chrome(start_url)
+
+        deadline = time.time() + 20
+        last_error = ""
+        while time.time() < deadline:
+            try:
+                return http_json("/json/version", timeout=1.0)
+            except Exception as exc:
+                last_error = str(exc)
+                time.sleep(0.5)
+        raise DailyError(
+            f"CDP endpoint did not become available at {CHROME_CDP_ADDRESS}:{CHROME_CDP_PORT} "
+            f"({last_error})"
+        )
+
+    def _page_targets(self) -> List[Dict[str, Any]]:
+        targets = http_json("/json", timeout=5.0)
+        if not isinstance(targets, list):
+            raise DailyError(f"Unexpected CDP target list: {targets}")
+        return [target for target in targets if target.get("type") == "page"]
+
+    def _attach_target(self, target: Dict[str, Any]) -> None:
+        ws_url = target.get("webSocketDebuggerUrl")
+        if not ws_url:
+            raise DailyError(f"CDP target did not expose a websocket URL: {target}")
+        if self.ws:
+            self.ws.close()
+        self.target_id = target.get("id")
+        self.ws = CdpWebSocket(ws_url)
+        self.ws.request("Page.enable")
+        self.ws.request("Runtime.enable")
+
+    def _open_profile_target(self, url: str) -> None:
+        self._launch_chrome(url)
+        self.ensure_running()
+        deadline = time.time() + 20
+        last_seen = ""
+        while time.time() < deadline:
+            for target in self._page_targets():
+                target_url = str(target.get("url") or "")
+                last_seen = target_url or last_seen
+                if target_url.startswith(url):
+                    self._attach_target(target)
+                    return
+            time.sleep(0.5)
+        raise DailyError(
+            f"Chrome did not open {url} in profile {CHROME_PROFILE_DIRECTORY or 'Default'} "
+            f"(last page URL: {last_seen or 'none'})"
+        )
+
+    def _create_target(self, url: str) -> None:
+        self.ensure_running()
+        encoded_url = urllib.parse.quote(url, safe="")
+        target = http_json(f"/json/new?{encoded_url}", method="PUT", timeout=5.0)
+        self._attach_target(target)
+
+    def open(self, url: str) -> None:
+        if not self.ws:
+            self._open_profile_target(url)
+            return
+        self.ws.request("Page.navigate", {"url": url})
+
+    def eval(self, js: str) -> str:
+        if not self.ws:
+            self._create_target("about:blank")
+        assert self.ws is not None
+        result = self.ws.request(
+            "Runtime.evaluate",
+            {
+                "expression": js,
+                "awaitPromise": True,
+                "returnByValue": True,
+                "userGesture": True,
+            },
+        )
+        if "exceptionDetails" in result:
+            details = result["exceptionDetails"]
+            text = details.get("text") or details.get("exception", {}).get("description") or details
+            raise DailyError(f"JavaScript evaluation failed: {text}")
+        remote = result.get("result", {})
+        if "value" in remote:
+            return str(remote["value"])
+        if remote.get("type") == "undefined":
+            return ""
+        return str(remote.get("unserializableValue", ""))
+
+
+def cdp_controller() -> CdpChromeController:
+    global CDP_CONTROLLER
+    if CDP_CONTROLLER is None:
+        CDP_CONTROLLER = CdpChromeController()
+    return CDP_CONTROLLER
+
+
+def set_control_mode(mode: str) -> None:
+    global CHROME_CONTROL_MODE
+    CHROME_CONTROL_MODE = mode
 
 
 def run_osascript(script: str) -> str:
@@ -205,6 +540,9 @@ def chrome_launch(url: str) -> None:
 
 
 def chrome_eval(js: str) -> str:
+    if CHROME_CONTROL_MODE == "cdp":
+        return cdp_controller().eval(js)
+
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".js", delete=False) as temp:
         temp.write(js)
         temp_path = temp.name
@@ -228,6 +566,10 @@ def chrome_eval(js: str) -> str:
 
 
 def chrome_open(url: str) -> None:
+    if CHROME_CONTROL_MODE == "cdp":
+        cdp_controller().open(url)
+        return
+
     global ACTIVE_URL_PREFIX
     ACTIVE_URL_PREFIX = url
     chrome_launch(url)
@@ -343,7 +685,9 @@ def manual_attention_reasons(state: Dict[str, Any]) -> List[str]:
 def raise_if_manual_attention_required(state: Dict[str, Any], context: str) -> None:
     reasons = manual_attention_reasons(state)
     if reasons:
-        raise DailyError(f"{context} requires manual login or verification ({evidence_summary(reasons)}).")
+        raise ManualAttentionError(
+            f"{context} requires manual login or verification ({evidence_summary(reasons)})."
+        )
 
 
 def question_form_is_actionable(state: Dict[str, Any]) -> bool:
@@ -546,15 +890,32 @@ QUESTION_EXTRACT_JS = r"""
   }
 
   const buttons = Array.from(document.querySelectorAll("button"));
-  const answerButtons = buttons
-    .map((button, domIndex) => ({ button, domIndex, text: cleanButtonText(button) }))
+  const buttonItems = buttons
+    .map((button, domIndex) => ({ button, domIndex, text: cleanButtonText(button) }));
+  const submitSpan = document.querySelector(submitSelector) || Array.from(document.querySelectorAll("span"))
+    .find(span => (span.textContent || "").replace(/\s+/g, "") === "提交答案");
+  const submit = submitSpan
+    ? submitSpan.closest("button")
+    : buttons.find(button => cleanButtonText(button).replace(/\s+/g, "").includes("提交答案"));
+  const strictAnswerItems = buttonItems
     .filter(item =>
       item.text &&
       item.button.className.includes("cursor-pointer") &&
       item.button.className.includes("rounded-md") &&
       item.button.className.includes("text-left") &&
       !item.text.includes("提交答案")
-    )
+    );
+  const fallbackAnswerItems = !strictAnswerItems.length && questionNode
+    ? buttonItems.filter(item => {
+      const compactText = item.text.replace(/\s+/g, "");
+      if (!item.text || item.button === submit || compactText.includes("提交答案")) return false;
+      if (item.button.closest("header, nav, footer")) return false;
+      const afterQuestion = !!(questionNode.compareDocumentPosition(item.button) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const beforeSubmit = !submit || !!(item.button.compareDocumentPosition(submit) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return afterQuestion && beforeSubmit;
+    })
+    : [];
+  const answerButtons = (strictAnswerItems.length ? strictAnswerItems : fallbackAnswerItems)
     .map((item, index) => {
       const img = item.button.querySelector("img");
       const imgSrc = img ? img.getAttribute("src") || "" : "";
@@ -572,12 +933,6 @@ QUESTION_EXTRACT_JS = r"""
         extensionMarker
       };
     });
-
-  const submitSpan = document.querySelector(submitSelector) || Array.from(document.querySelectorAll("span"))
-    .find(span => (span.textContent || "").replace(/\s+/g, "") === "提交答案");
-  const submit = submitSpan
-    ? submitSpan.closest("button")
-    : buttons.find(button => cleanButtonText(button).replace(/\s+/g, "").includes("提交答案"));
   return JSON.stringify({
     url: location.href,
     title: document.title,
@@ -601,8 +956,11 @@ QUESTION_CLICK_JS = r"""
     cancelable: true,
     view: window,
   }));
+  const questionNode = document.querySelector(".text-base.text-orange");
   const buttons = Array.from(document.querySelectorAll("button"));
-  const answerButtons = buttons
+  const submitButton = Array.from(document.querySelectorAll("button"))
+    .find(button => cleanButtonText(button).replace(/\s+/g, "").includes("提交答案"));
+  const strictAnswerButtons = buttons
     .filter(button =>
       cleanButtonText(button) &&
       button.className.includes("cursor-pointer") &&
@@ -610,6 +968,18 @@ QUESTION_CLICK_JS = r"""
       button.className.includes("text-left") &&
       !cleanButtonText(button).includes("提交答案")
     );
+  const fallbackAnswerButtons = !strictAnswerButtons.length && questionNode
+    ? buttons.filter(button => {
+      const text = cleanButtonText(button);
+      const compactText = text.replace(/\s+/g, "");
+      if (!text || button === submitButton || compactText.includes("提交答案")) return false;
+      if (button.closest("header, nav, footer")) return false;
+      const afterQuestion = !!(questionNode.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const beforeSubmit = !submitButton || !!(button.compareDocumentPosition(submitButton) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return afterQuestion && beforeSubmit;
+    })
+    : [];
+  const answerButtons = strictAnswerButtons.length ? strictAnswerButtons : fallbackAnswerButtons;
   if (!answerButtons[index]) return JSON.stringify({ ok: false, reason: "answer button not found" });
   const answer = answerButtons[index];
   answer.scrollIntoView({ block: "center", inline: "center" });
@@ -617,6 +987,7 @@ QUESTION_CLICK_JS = r"""
   fire(answer, "pointerdown");
   fire(answer, "mousedown");
   fire(answer, "mouseup");
+  fire(answer, "pointerup");
   fire(answer, "click");
   answer.click();
   return JSON.stringify({ ok: true });
@@ -825,15 +1196,18 @@ def choose_answer(state: Dict[str, Any], extension_timeout: int) -> Optional[Dic
 
 def click_question_answer(index: int, submit: bool) -> None:
     payload = json.dumps({"index": index}, ensure_ascii=False)
+    wait_before_click("question answer click")
     result = json.loads(chrome_eval(QUESTION_CLICK_JS.replace("ARGUMENTS", payload)))
     if not result.get("ok"):
         raise DailyError(result.get("reason", "failed to click answer"))
     if submit:
         # The submit button starts disabled and becomes enabled after answer selection.
         # Poll up to 3 seconds for it to become clickable.
-        deadline = time.time() + 3
+        _, max_click_wait = click_wait_range()
+        deadline = time.time() + 3 + max_click_wait
         while time.time() < deadline:
             time.sleep(0.5)
+            wait_before_click("question submit click")
             js = SUBMIT_CLICK_JS.replace('"SUBMIT_SELECTOR"', json.dumps(QUESTION_SUBMIT_SPAN_SELECTOR))
             result = json.loads(chrome_eval(js))
             if result.get("ok"):
@@ -880,11 +1254,18 @@ def run_question(submit: bool, extension_timeout: int) -> str:
         log(f"Question submit status: {status}")
         return status
     click_question_answer(answer["index"], submit=False)
-    time.sleep(1)
-    after_select = page_state()
-    raise_if_manual_attention_required(after_select, "Question page after selecting answer")
-    if after_select.get("submitDisabled") is not False:
-        raise DailyError("dry-run selected answer, but submit button did not become enabled")
+    deadline = time.time() + 3
+    after_select: Dict[str, Any] = {}
+    while time.time() < deadline:
+        time.sleep(0.5)
+        after_select = page_state()
+        raise_if_manual_attention_required(after_select, "Question page after selecting answer")
+        if after_select.get("submitDisabled") is False:
+            break
+    else:
+        raise DailyError(
+            f"dry-run selected answer, but submit button did not become enabled ({state_summary(after_select)})"
+        )
     log("Question dry-run selected answer and submit button is enabled.")
     return "dry-run"
 
@@ -914,6 +1295,8 @@ def run_checkin(submit: bool, message: Optional[str]) -> str:
 
     payload = json.dumps({"message": message, "submit": submit}, ensure_ascii=False)
     checkin_js = CHECKIN_JS.replace('"SUBMIT_SELECTOR"', json.dumps(CHECKIN_SUBMIT_SPAN_SELECTOR))
+    if submit:
+        wait_before_click("check-in submit click")
     result = json.loads(chrome_eval(checkin_js.replace("ARGUMENTS", payload)))
     if not result.get("ok"):
         raise DailyError(result.get("reason", "failed to fill check-in"))
@@ -926,13 +1309,27 @@ def run_checkin(submit: bool, message: Optional[str]) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.random_start_delay:
+        wait_before_launch_start()
+    set_control_mode(args.control)
     submit = args.submit
     failed = False
-    profile = CHROME_PROFILE_DIRECTORY or "Chrome default"
-    log(f"Using Chrome profile directory: {profile}")
+    manual_attention = False
+    if CHROME_CONTROL_MODE == "cdp":
+        log(
+            "Using CDP Chrome profile: "
+            f"{CHROME_USER_DATA_DIR} ({CHROME_CDP_ADDRESS}:{CHROME_CDP_PORT})"
+        )
+    else:
+        profile = CHROME_PROFILE_DIRECTORY or "Chrome default"
+        log(f"Using Chrome profile directory: {profile}")
 
     try:
         q_status = run_question(submit=submit, extension_timeout=args.extension_timeout)
+    except ManualAttentionError as exc:
+        q_status = f"manual_attention: {exc}"
+        manual_attention = True
+        log(f"Question needs manual attention: {exc}")
     except Exception as exc:
         q_status = f"error: {exc}"
         failed = True
@@ -940,6 +1337,10 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         c_status = run_checkin(submit=submit, message=args.checkin_message)
+    except ManualAttentionError as exc:
+        c_status = f"manual_attention: {exc}"
+        manual_attention = True
+        log(f"Check-in needs manual attention: {exc}")
     except Exception as exc:
         c_status = f"error: {exc}"
         failed = True
@@ -952,7 +1353,33 @@ def run(args: argparse.Namespace) -> int:
     if q_status in success_states and c_status in success_states:
         log("Success: All daily tasks (Question and Check-in) are completed!")
 
+    if manual_attention:
+        return 2
     return 1 if failed else 0
+
+
+def setup_cdp(args: argparse.Namespace) -> int:
+    set_control_mode("cdp")
+    url = args.url or CHECKIN_URL
+    log(
+        "Starting dedicated CDP Chrome profile: "
+        f"{CHROME_USER_DATA_DIR} ({CHROME_CDP_ADDRESS}:{CHROME_CDP_PORT})"
+    )
+    already_running = False
+    try:
+        http_json("/json/version", timeout=1.0)
+        already_running = True
+    except Exception:
+        pass
+
+    controller = cdp_controller()
+    controller.ensure_running(start_url=None if already_running else url)
+    if already_running:
+        controller.open(url)
+    version = http_json("/json/version", timeout=2.0)
+    log(f"CDP endpoint is available: {version.get('Browser', 'Chrome')}")
+    log("If this is the first run, log in and complete any verification in the opened Chrome window.")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -961,9 +1388,29 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     run_parser = subparsers.add_parser("run", help="Run daily question and check-in")
     run_parser.add_argument("--submit", action="store_true", help="Actually submit answer and check-in")
-    run_parser.add_argument("--extension-timeout", type=int, default=12, help="Seconds to wait for extension answer")
+    run_parser.add_argument(
+        "--control",
+        choices=("applescript", "cdp"),
+        default=CHROME_CONTROL_MODE,
+        help="Chrome control backend",
+    )
+    run_parser.add_argument(
+        "--extension-timeout",
+        type=int,
+        default=CHROME_EXTENSION_TIMEOUT,
+        help="Seconds to wait for extension answer",
+    )
+    run_parser.add_argument(
+        "--random-start-delay",
+        action="store_true",
+        help="Wait a random interval before starting the daily run",
+    )
     run_parser.add_argument("--checkin-message", help="Override check-in text")
     run_parser.set_defaults(func=run)
+
+    setup_parser = subparsers.add_parser("setup-cdp", help="Open the dedicated CDP Chrome profile")
+    setup_parser.add_argument("--url", default=CHECKIN_URL, help="URL to open after starting Chrome")
+    setup_parser.set_defaults(func=setup_cdp)
 
     args = parser.parse_args(argv)
     try:
@@ -971,6 +1418,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         log("Cancelled.")
         return 130
+    except ManualAttentionError as exc:
+        log(f"Manual attention required: {exc}")
+        return 2
     except DailyError as exc:
         log(f"Failed: {exc}")
         return 1
