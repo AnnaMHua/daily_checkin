@@ -201,6 +201,19 @@ def http_json(path: str, method: str = "GET", timeout: float = 2.0) -> Dict[str,
         conn.close()
 
 
+def http_text(path: str, method: str = "GET", timeout: float = 2.0) -> str:
+    conn = http.client.HTTPConnection(CHROME_CDP_ADDRESS, CHROME_CDP_PORT, timeout=timeout)
+    try:
+        conn.request(method, path)
+        response = conn.getresponse()
+        body = response.read().decode("utf-8", errors="replace")
+        if response.status >= 400:
+            raise DailyError(f"CDP HTTP {method} {path} failed: {response.status} {body[:300]}")
+        return body
+    finally:
+        conn.close()
+
+
 class CdpWebSocket:
     def __init__(self, url: str, timeout: float = 10.0):
         parsed = urllib.parse.urlparse(url)
@@ -331,6 +344,12 @@ class CdpChromeController:
     def __init__(self) -> None:
         self.ws: Optional[CdpWebSocket] = None
         self.target_id: Optional[str] = None
+        self.opened_target_ids: List[str] = []
+
+    def _remember_opened_target(self, target: Dict[str, Any]) -> None:
+        target_id = str(target.get("id") or "")
+        if target_id and target_id not in self.opened_target_ids:
+            self.opened_target_ids.append(target_id)
 
     def _chrome_args(self, url: Optional[str] = None) -> List[str]:
         args = [
@@ -396,18 +415,32 @@ class CdpChromeController:
         self.ws.request("Runtime.enable")
 
     def _open_profile_target(self, url: str) -> None:
+        try:
+            existing_target_ids = {str(target.get("id") or "") for target in self._page_targets()}
+        except Exception:
+            existing_target_ids = set()
         self._launch_chrome(url)
         self.ensure_running()
         deadline = time.time() + 20
         last_seen = ""
+        fallback_target: Optional[Dict[str, Any]] = None
         while time.time() < deadline:
             for target in self._page_targets():
                 target_url = str(target.get("url") or "")
+                target_id = str(target.get("id") or "")
                 last_seen = target_url or last_seen
                 if target_url.startswith(url):
+                    if not fallback_target:
+                        fallback_target = target
+                    if target_id in existing_target_ids:
+                        continue
                     self._attach_target(target)
+                    self._remember_opened_target(target)
                     return
             time.sleep(0.5)
+        if fallback_target:
+            self._attach_target(fallback_target)
+            return
         raise DailyError(
             f"Chrome did not open {url} in profile {CHROME_PROFILE_DIRECTORY or 'Default'} "
             f"(last page URL: {last_seen or 'none'})"
@@ -418,12 +451,31 @@ class CdpChromeController:
         encoded_url = urllib.parse.quote(url, safe="")
         target = http_json(f"/json/new?{encoded_url}", method="PUT", timeout=5.0)
         self._attach_target(target)
+        self._remember_opened_target(target)
 
-    def open(self, url: str) -> None:
+    def open(self, url: str, new_tab: bool = False) -> None:
+        if new_tab:
+            self._create_target(url)
+            return
         if not self.ws:
             self._open_profile_target(url)
             return
         self.ws.request("Page.navigate", {"url": url})
+
+    def close_opened_targets(self) -> int:
+        closed = 0
+        for target_id in list(reversed(self.opened_target_ids)):
+            try:
+                http_text(f"/json/close/{urllib.parse.quote(target_id, safe='')}", timeout=3.0)
+                closed += 1
+            except Exception as exc:
+                log(f"Could not close Chrome tab {target_id}: {exc}")
+        self.opened_target_ids.clear()
+        if self.ws:
+            self.ws.close()
+            self.ws = None
+            self.target_id = None
+        return closed
 
     def eval(self, js: str) -> str:
         if not self.ws:
@@ -565,9 +617,9 @@ def chrome_eval(js: str) -> str:
             pass
 
 
-def chrome_open(url: str) -> None:
+def chrome_open(url: str, new_tab: bool = False) -> None:
     if CHROME_CONTROL_MODE == "cdp":
-        cdp_controller().open(url)
+        cdp_controller().open(url, new_tab=new_tab)
         return
 
     global ACTIVE_URL_PREFIX
@@ -707,9 +759,11 @@ def question_text_indicates_failed(text: str) -> bool:
 
 
 def question_already_done(state: Dict[str, Any]) -> bool:
+    if question_text_indicates_done(page_body(state)):
+        return True
     if question_form_is_actionable(state):
         return False
-    return question_text_indicates_done(page_body(state))
+    return False
 
 
 def question_submit_status(state: Dict[str, Any]) -> str:
@@ -815,11 +869,12 @@ def find_bank_answer(question: str, options: List[str]) -> Optional[Dict[str, An
 PAGE_HELPERS_JS = r"""
   function isVisible(el) {
     if (!el || !el.ownerDocument || !el.ownerDocument.defaultView) return false;
+    if (el.tagName === "INPUT" && (el.getAttribute("type") || "").toLowerCase() === "hidden") return false;
     const style = el.ownerDocument.defaultView.getComputedStyle(el);
     if (!style || style.display === "none" || style.visibility === "hidden") return false;
     if (Number(style.opacity) === 0) return false;
     if (el.getClientRects().length > 0) return true;
-    return ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
+    return ["TEXTAREA", "SELECT"].includes(el.tagName);
   }
 
   function visibleElements(selector) {
@@ -866,9 +921,9 @@ PAGE_HELPERS_JS = r"""
 
     const challengeElements = Array.from(document.querySelectorAll("iframe, input, div, section, form"))
       .filter(el => /(captcha|recaptcha|hcaptcha|turnstile|cf-challenge|cloudflare)/i.test(elementHaystack(el)))
-      .filter(el => isVisible(el) || el.tagName === "INPUT");
+      .filter(el => isVisible(el));
     if (challengeElements.length) {
-      evidence.push(`${challengeElements.length} captcha/challenge element(s)`);
+      evidence.push(`${challengeElements.length} visible captcha/challenge element(s)`);
     }
 
     return { required: evidence.length > 0, evidence };
@@ -1127,10 +1182,10 @@ def wait_for_question_submit_status(timeout: int = 8) -> str:
     while time.time() < deadline:
         state = page_state()
         last_state = state
-        raise_if_manual_attention_required(state, "Question page after submit")
         status = question_submit_status(state)
         if status != "submitted":
             return status
+        raise_if_manual_attention_required(state, "Question page after submit")
         last_status = status
         time.sleep(1)
     log(f"Question submit still pending ({state_summary(last_state)}).")
@@ -1143,9 +1198,9 @@ def wait_for_checkin_submit_status(timeout: int = 8) -> str:
     while time.time() < deadline:
         state = checkin_state()
         last_state = state
-        raise_if_manual_attention_required(state, "Check-in page after submit")
         if checkin_already_done(state):
             return "success"
+        raise_if_manual_attention_required(state, "Check-in page after submit")
         time.sleep(1)
     log(f"Check-in submit still pending ({state_summary(last_state)}).")
     return "submitted"
@@ -1279,9 +1334,9 @@ def env_messages() -> List[str]:
     return CHECKIN_MESSAGES
 
 
-def run_checkin(submit: bool, message: Optional[str]) -> str:
+def run_checkin(submit: bool, message: Optional[str], open_new_tab: bool = False) -> str:
     message = message or random.choice(env_messages())
-    chrome_open(CHECKIN_URL)
+    chrome_open(CHECKIN_URL, new_tab=open_new_tab)
     wait_for_url(CHECKIN_URL)
     wait_for_ready()
     time.sleep(2)
@@ -1315,6 +1370,7 @@ def run(args: argparse.Namespace) -> int:
     submit = args.submit
     failed = False
     manual_attention = False
+    question_manual_attention = False
     if CHROME_CONTROL_MODE == "cdp":
         log(
             "Using CDP Chrome profile: "
@@ -1329,6 +1385,7 @@ def run(args: argparse.Namespace) -> int:
     except ManualAttentionError as exc:
         q_status = f"manual_attention: {exc}"
         manual_attention = True
+        question_manual_attention = True
         log(f"Question needs manual attention: {exc}")
     except Exception as exc:
         q_status = f"error: {exc}"
@@ -1336,7 +1393,13 @@ def run(args: argparse.Namespace) -> int:
         log(f"Question failed: {exc}")
 
     try:
-        c_status = run_checkin(submit=submit, message=args.checkin_message)
+        if question_manual_attention:
+            log("Opening check-in in a new tab to preserve the question page for manual attention.")
+        c_status = run_checkin(
+            submit=submit,
+            message=args.checkin_message,
+            open_new_tab=question_manual_attention,
+        )
     except ManualAttentionError as exc:
         c_status = f"manual_attention: {exc}"
         manual_attention = True
@@ -1352,6 +1415,10 @@ def run(args: argparse.Namespace) -> int:
     success_states = {"already_done", "success"}
     if q_status in success_states and c_status in success_states:
         log("Success: All daily tasks (Question and Check-in) are completed!")
+        if CHROME_CONTROL_MODE == "cdp":
+            closed = cdp_controller().close_opened_targets()
+            if closed:
+                log(f"Closed {closed} Chrome tab(s) opened by this run.")
 
     if manual_attention:
         return 2
