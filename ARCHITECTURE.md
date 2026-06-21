@@ -170,6 +170,7 @@ CDP 端口绑定 `127.0.0.1`，不对局域网或公网开放。
 | Chrome 或 CDP 异常 | 记录错误，进程以失败状态退出 |
 
 只有答题和签到都处于 `success` 或 `already_done` 时，日志才会写入总成功信息。
+如果这次运行新启动了 Chrome，那么在总成功后会把这次启动的 Chrome 进程关闭；如果只是连到已有浏览器，则只关闭本次打开的标签页。
 
 ## 为什么使用 LaunchAgent
 
@@ -197,6 +198,9 @@ Question already appears complete.
 Check-in already appears complete.
 Done: question=already_done, checkin=already_done, submit=True
 Success: All daily tasks (Question and Check-in) are completed!
+Closed the Chrome browser launched by this run.
+Closed the Chrome process launched by this run.
+Closed 1 Chrome tab(s) opened by this run.
 ```
 
 ## 常用操作

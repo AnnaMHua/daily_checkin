@@ -345,6 +345,8 @@ class CdpChromeController:
         self.ws: Optional[CdpWebSocket] = None
         self.target_id: Optional[str] = None
         self.opened_target_ids: List[str] = []
+        self.chrome_process: Optional[subprocess.Popen[str]] = None
+        self.should_close_browser = False
 
     def _remember_opened_target(self, target: Dict[str, Any]) -> None:
         target_id = str(target.get("id") or "")
@@ -365,16 +367,53 @@ class CdpChromeController:
             args.append(url)
         return args
 
-    def _launch_chrome(self, url: Optional[str] = None) -> None:
+    def _launch_chrome(self, url: Optional[str] = None, *, should_close_browser: bool = False) -> None:
         if not CHROME_EXECUTABLE.exists():
             raise DailyError(f"Chrome executable not found: {CHROME_EXECUTABLE}")
         CHROME_USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(
+        self.chrome_process = subprocess.Popen(
             self._chrome_args(url),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        self.should_close_browser = self.should_close_browser or should_close_browser
+
+    def _close_browser_via_cdp(self) -> bool:
+        if not self.should_close_browser:
+            return False
+        self.should_close_browser = False
+        try:
+            version = http_json("/json/version", timeout=2.0)
+            ws_url = version.get("webSocketDebuggerUrl")
+            if not ws_url:
+                return False
+            browser_ws = CdpWebSocket(str(ws_url), timeout=3.0)
+            try:
+                browser_ws.request("Browser.close", timeout=3.0)
+            except DailyError as exc:
+                if "CDP websocket closed" not in str(exc):
+                    raise
+            finally:
+                browser_ws.close()
+            return True
+        except Exception as exc:
+            log(f"Could not close Chrome browser through CDP: {exc}")
+            return False
+
+    def _close_chrome_process(self) -> bool:
+        process = self.chrome_process
+        self.chrome_process = None
+        if not process:
+            return False
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        return True
 
     def ensure_running(self, start_url: Optional[str] = None) -> Dict[str, Any]:
         try:
@@ -382,7 +421,7 @@ class CdpChromeController:
         except Exception:
             pass
 
-        self._launch_chrome(start_url)
+        self._launch_chrome(start_url, should_close_browser=True)
 
         deadline = time.time() + 20
         last_error = ""
@@ -415,11 +454,13 @@ class CdpChromeController:
         self.ws.request("Runtime.enable")
 
     def _open_profile_target(self, url: str) -> None:
+        endpoint_was_running = False
         try:
             existing_target_ids = {str(target.get("id") or "") for target in self._page_targets()}
+            endpoint_was_running = True
         except Exception:
             existing_target_ids = set()
-        self._launch_chrome(url)
+        self._launch_chrome(url, should_close_browser=not endpoint_was_running)
         self.ensure_running()
         deadline = time.time() + 20
         last_seen = ""
@@ -475,6 +516,10 @@ class CdpChromeController:
             self.ws.close()
             self.ws = None
             self.target_id = None
+        if self._close_browser_via_cdp():
+            log("Closed the Chrome browser launched by this run.")
+        if self._close_chrome_process():
+            log("Closed the Chrome process launched by this run.")
         return closed
 
     def eval(self, js: str) -> str:

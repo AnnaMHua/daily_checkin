@@ -194,6 +194,9 @@ Question already appears complete.
 Check-in already appears complete.
 Done: question=already_done, checkin=already_done, submit=True
 Success: All daily tasks (Question and Check-in) are completed!
+Closed the Chrome browser launched by this run.
+Closed the Chrome process launched by this run.
+Closed 1 Chrome tab(s) opened by this run.
 ```
 
 ## 常见问题
