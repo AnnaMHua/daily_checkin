@@ -129,5 +129,74 @@ class ChromeControllerTests(unittest.TestCase):
         self.assertTrue(any("Closed the Chrome browser launched by this run." in msg for msg in logs))
 
 
+class ManualAttentionTests(unittest.TestCase):
+    def test_challenge_only_evidence_does_not_force_manual_attention(self):
+        state = {
+            "attention": {"evidence": ["1 visible captcha/challenge element(s)"]},
+            "bodyText": "签到成功",
+        }
+
+        chrome_daily.raise_if_manual_attention_required(state, "Check-in page")
+
+    def test_login_evidence_still_forces_manual_attention(self):
+        state = {
+            "attention": {"evidence": ["1 visible password input(s)"]},
+            "bodyText": "",
+        }
+
+        with self.assertRaises(chrome_daily.ManualAttentionError):
+            chrome_daily.raise_if_manual_attention_required(state, "Question page")
+
+
+class RunCleanupTests(unittest.TestCase):
+    def test_submitted_tasks_close_opened_cdp_targets(self):
+        class FakeController:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close_opened_targets(self) -> int:
+                self.closed = True
+                return 2
+
+        controller = FakeController()
+        logs = []
+
+        original_run_question = chrome_daily.run_question
+        original_run_checkin = chrome_daily.run_checkin
+        original_cdp_controller = chrome_daily.cdp_controller
+        original_log = chrome_daily.log
+        original_control_mode = chrome_daily.CHROME_CONTROL_MODE
+        try:
+            chrome_daily.run_question = lambda submit, extension_timeout: "submitted"
+            chrome_daily.run_checkin = lambda submit, message, open_new_tab=False: "submitted"
+            chrome_daily.cdp_controller = lambda: controller
+            chrome_daily.log = logs.append
+            chrome_daily.CHROME_CONTROL_MODE = "cdp"
+
+            args = type(
+                "Args",
+                (),
+                {
+                    "random_start_delay": False,
+                    "control": "cdp",
+                    "submit": True,
+                    "extension_timeout": 0,
+                    "checkin_message": None,
+                },
+            )()
+
+            exit_code = chrome_daily.run(args)
+        finally:
+            chrome_daily.run_question = original_run_question
+            chrome_daily.run_checkin = original_run_checkin
+            chrome_daily.cdp_controller = original_cdp_controller
+            chrome_daily.log = original_log
+            chrome_daily.CHROME_CONTROL_MODE = original_control_mode
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(controller.closed)
+        self.assertTrue(any("Closed 2 Chrome tab(s) opened by this run." in msg for msg in logs))
+
+
 if __name__ == "__main__":
     unittest.main()

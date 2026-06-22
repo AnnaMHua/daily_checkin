@@ -5,7 +5,7 @@
 - 每日答题：`https://www.1point3acres.com/next/daily-question`
 - 每日签到：`https://www.1point3acres.com/next/daily-checkin`
 
-它不会保存账号密码，不读取 Chrome cookie 文件，不绕过真人验证，也不调用 LLM。遇到登录失效、验证码或人机验证时，脚本会记录错误并保留 Chrome 窗口给你手动处理；答题步骤出错时仍会继续尝试签到。
+它不会保存账号密码，不读取 Chrome cookie 文件，不绕过真人验证，也不调用 LLM。遇到明确的登录失效、验证码或人机验证时，脚本会记录错误并保留 Chrome 窗口给你手动处理；答题步骤出错时仍会继续尝试签到。
 
 ## 当前方案
 
@@ -199,11 +199,13 @@ Closed the Chrome process launched by this run.
 Closed 1 Chrome tab(s) opened by this run.
 ```
 
+如果提交后页面没有返回明确的成功文案，但也没有检测到登录页、密码框或明确的验证码文案，状态可能显示为 `submitted`。这种情况下脚本会把单独的 captcha/challenge 残留元素当作弱信号，不再因此保留浏览器；答题和签到都没有失败时，会继续关闭本次运行打开的 Chrome。
+
 ## 常见问题
 
 ### 真人验证或验证码
 
-脚本不会绕过真人验证。出现这类页面时会停止并写日志，需要你在专属 Chrome 窗口里手动处理。
+脚本不会绕过真人验证。出现登录页、密码框、登录表单或明确验证码文案时会停止并写日志，需要你在专属 Chrome 窗口里手动处理。页面上单独残留的 captcha/challenge 相关元素不一定代表真的需要验证，脚本不会仅凭这类弱信号保留浏览器。
 
 ### Chrome 没有登录
 

@@ -749,6 +749,22 @@ def evidence_summary(values: Iterable[str]) -> str:
     return ", ".join(evidence[:4]) + f", +{len(evidence) - 4} more"
 
 
+def is_weak_challenge_evidence(reason: str) -> bool:
+    normalized = normalize(reason)
+    return any(
+        token in normalized
+        for token in (
+            normalize("captcha/challenge element"),
+            normalize("captcha"),
+            normalize("recaptcha"),
+            normalize("hcaptcha"),
+            normalize("turnstile"),
+            normalize("cf-challenge"),
+            normalize("cloudflare"),
+        )
+    )
+
+
 def state_summary(state: Dict[str, Any]) -> str:
     fields = [
         "url",
@@ -773,7 +789,8 @@ def state_summary(state: Dict[str, Any]) -> str:
 
 def manual_attention_reasons(state: Dict[str, Any]) -> List[str]:
     attention = state.get("attention") if isinstance(state, dict) else {}
-    reasons = list((attention or {}).get("evidence") or [])
+    raw_reasons = list((attention or {}).get("evidence") or [])
+    reasons = [reason for reason in raw_reasons if not is_weak_challenge_evidence(str(reason))]
     for pattern in matching_patterns(page_body(state), MANUAL_ATTENTION_FALLBACK_PATTERNS):
         reasons.append(f'text fallback "{pattern}"')
     return dedupe(reasons)
@@ -1460,6 +1477,9 @@ def run(args: argparse.Namespace) -> int:
     success_states = {"already_done", "success"}
     if q_status in success_states and c_status in success_states:
         log("Success: All daily tasks (Question and Check-in) are completed!")
+
+    cleanup_states = success_states | {"submitted"}
+    if submit and q_status in cleanup_states and c_status in cleanup_states:
         if CHROME_CONTROL_MODE == "cdp":
             closed = cdp_controller().close_opened_targets()
             if closed:
